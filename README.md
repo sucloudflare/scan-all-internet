@@ -1,224 +1,270 @@
-# Mini Recon Pipeline (Bug Bounty / Attack Surface Research)
-
-Este projeto mostra como montar um pipeline básico inspirado em ferramentas usadas por pesquisadores de segurança e plataformas como entity["company","Shodan","search engine for internet-connected devices"] e entity["company","Censys","internet intelligence company"].
-
-> Objetivo: descobrir ativos autorizados, validar serviços expostos, identificar tecnologias e encontrar vulnerabilidades conhecidas.
-
----
-
-## Stack usada
-
-### entity["software","Subfinder","ProjectDiscovery subdomain enumerator"]
-
-Enumera subdomínios.
-
-```bash
-subfinder -d target.com -silent
-```
-
----
-
-### entity["software","ZMap","network scanner"]
-
-Escaneia portas em alta velocidade.
-
-```bash
-sudo zmap -p 443 1.1.1.0/24
-```
-
-Usado para:
-
-* descobrir hosts vivos
-* identificar superfícies expostas
-* scan massivo
-
----
-
-### entity["software","httpx","ProjectDiscovery HTTP toolkit"]
-
-Fingerprint HTTP.
-
-```bash
-cat subs.txt | httpx -title -tech-detect -status-code
-```
-
-Detecta:
-
-* tecnologias
-* título da página
-* status code
-* redirecionamentos
-
----
-
-### entity["software","Nuclei","ProjectDiscovery vulnerability scanner"]
-
-Executa templates de CVE.
-
-```bash
-cat subs.txt | nuclei -severity critical,high,medium
-```
-
-Exemplo de vulnerabilidades históricas:
-
-* entity["historical_event","Log4Shell","CVE-2021-44228 vulnerability"]
-* entity["historical_event","Apache HTTP Server Path Traversal Vulnerability","CVE-2021-41773"]
-
----
-
-### entity["software","Nmap","network scanner"]
-
-Validação manual.
-
-```bash
-nmap -sV target.com
-```
-
----
-
-# Fluxo completo
-
-```text
-Subfinder
-↓
-ZMap
-↓
-httpx
-↓
-Nuclei
-↓
-Nmap manual
-```
-
----
-
-# Script automático
-
-Crie um arquivo:
-
-```bash
-nano recon_pipeline.sh
-```
-
-Cole o código abaixo:
+# setup_recon.sh
 
 ```bash
 #!/bin/bash
+set -e
 
-TARGET=$1
+echo "=============================="
+echo " RECON STACK INSTALLER"
+echo "=============================="
 
-if [ -z "$TARGET" ]; then
-  echo "Uso: ./recon_pipeline.sh dominio.com"
-  exit 1
+# Atualização
+sudo apt update && sudo apt upgrade -y
+
+# Dependências base
+sudo apt install -y \
+  python3 python3-pip python3-full python3.12-venv \
+  golang-go git curl wget unzip jq nmap build-essential
+
+# Virtualenv Python
+if [ ! -d "$HOME/bb-env" ]; then
+  python3 -m venv ~/bb-env
 fi
 
-mkdir -p results/$TARGET
+source ~/bb-env/bin/activate
 
+pip install --upgrade pip
+pip install requests httpx aiohttp pandas
 
-echo "[1] Enumerando subdomínios..."
-subfinder -d $TARGET -silent -o results/$TARGET/subs.txt
+# PATH Go
+if ! grep -q "go/bin" ~/.bashrc; then
+  echo 'export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin' >> ~/.bashrc
+fi
 
+export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin
 
-echo "[2] HTTP fingerprint..."
-cat results/$TARGET/subs.txt | httpx \
--title \
--tech-detect \
--status-code \
--o results/$TARGET/httpx.txt
+# Ferramentas Go
+GO111MODULE=on go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+GO111MODULE=on go install github.com/projectdiscovery/httpx/cmd/httpx@latest
+GO111MODULE=on go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+GO111MODULE=on go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest
 
+# Templates nuclei
+~/go/bin/nuclei -update-templates
 
-echo "[3] Rodando nuclei..."
-cat results/$TARGET/subs.txt | nuclei \
--severity critical,high,medium \
--o results/$TARGET/nuclei.txt
+# Estrutura do projeto
+mkdir -p ~/recon-lab/{targets,results,scripts}
 
+echo "example.com" > ~/recon-lab/targets/targets.txt
 
-echo "[4] Validação manual com Nmap (top 10 hosts)..."
-cat results/$TARGET/subs.txt | head -10 | while read host
- do
-   nmap -sV $host >> results/$TARGET/nmap.txt
- done
-
-
-echo "Recon finalizado."
-echo "Resultados salvos em: results/$TARGET/"
+echo "=============================="
+echo " INSTALAÇÃO FINALIZADA"
+echo "=============================="
+echo "Ative o ambiente: source ~/bb-env/bin/activate"
 ```
 
 ---
 
-# Permissão
+# recon_pipeline.sh
+
+```bash
+#!/bin/bash
+set -e
+
+TARGET_FILE="$HOME/recon-lab/targets/targets.txt"
+RESULT_DIR="$HOME/recon-lab/results/$(date +%Y-%m-%d_%H-%M-%S)"
+mkdir -p "$RESULT_DIR"
+
+echo "[1] Enumerando subdomínios..."
+subfinder -dL "$TARGET_FILE" -silent -o "$RESULT_DIR/subdomains.txt"
+
+echo "[2] Resolvendo DNS..."
+dnsx -l "$RESULT_DIR/subdomains.txt" -silent -resp-only > "$RESULT_DIR/resolved.txt"
+
+echo "[3] Fingerprint HTTP..."
+httpx -l "$RESULT_DIR/resolved.txt" \
+  -title \
+  -tech-detect \
+  -status-code \
+  -follow-redirects \
+  -silent > "$RESULT_DIR/httpx.txt"
+
+echo "[4] Scan CVEs..."
+nuclei -l "$RESULT_DIR/resolved.txt" \
+  -severity low,medium,high,critical \
+  -o "$RESULT_DIR/nuclei.txt"
+
+echo "[5] Validação Nmap..."
+head -20 "$RESULT_DIR/resolved.txt" > "$RESULT_DIR/top20.txt"
+nmap -iL "$RESULT_DIR/top20.txt" -sV -Pn -oN "$RESULT_DIR/nmap.txt"
+
+echo "[6] Resumo final"
+echo "Subdomínios encontrados: $(wc -l < $RESULT_DIR/subdomains.txt)"
+echo "IPs resolvidos: $(wc -l < $RESULT_DIR/resolved.txt)"
+echo "Hosts HTTP ativos: $(wc -l < $RESULT_DIR/httpx.txt)"
+echo "Possíveis vulnerabilidades: $(wc -l < $RESULT_DIR/nuclei.txt)"
+
+echo "Resultados salvos em: $RESULT_DIR"
+```
+
+---
+
+# README.md
+
+````markdown
+# Mini Recon Pipeline
+
+Pipeline automatizado para reconhecimento de ativos, fingerprint de serviços e detecção inicial de vulnerabilidades.
+
+Este projeto simula uma versão simplificada de fluxos usados em:
+
+- Bug bounty
+- Attack Surface Management
+- Pesquisa de exposição pública
+- Validação inicial de CVEs conhecidas
+
+---
+
+## Arquitetura
+
+```text
+Subfinder
+   ↓
+DNSX
+   ↓
+HTTPX
+   ↓
+Nuclei
+   ↓
+Nmap
+````
+
+### O que cada ferramenta faz
+
+**Subfinder**
+
+* Descobre subdomínios
+* Usa fontes públicas
+* Enumeração passiva
+
+**DNSX**
+
+* Resolve os subdomínios encontrados
+* Remove domínios mortos
+
+**HTTPX**
+
+* Detecta hosts web ativos
+* Captura status code
+* Detecta tecnologias
+* Segue redirects
+
+**Nuclei**
+
+* Executa templates de vulnerabilidade
+* Detecta exposições conhecidas
+
+**Nmap**
+
+* Faz validação manual de portas e serviços
+
+---
+
+## Instalação
+
+Clone o projeto:
+
+```bash
+git clone https://github.com/seuusuario/mini-recon-pipeline.git
+cd mini-recon-pipeline
+```
+
+Dê permissão:
+
+```bash
+chmod +x setup_recon.sh
+```
+
+Execute:
+
+```bash
+./setup_recon.sh
+```
+
+---
+
+## Configurando alvos
+
+Edite:
+
+```bash
+nano ~/recon-lab/targets/targets.txt
+```
+
+Exemplo:
+
+```text
+example.com
+hackerone.com
+bugcrowd.com
+```
+
+---
+
+## Executando pipeline
 
 ```bash
 chmod +x recon_pipeline.sh
+./recon_pipeline.sh
 ```
 
 ---
 
-# Executar
-
-```bash
-./recon_pipeline.sh example.com
-```
-
----
-
-# Estrutura de pastas
+## Saída esperada
 
 ```text
-project/
- ├── recon_pipeline.sh
- ├── README.md
+recon-lab/
+ ├── targets/
+ │   └── targets.txt
+ │
  └── results/
+     └── 2026-05-16_00-30-00/
+         ├── subdomains.txt
+         ├── resolved.txt
+         ├── httpx.txt
+         ├── nuclei.txt
+         └── nmap.txt
 ```
 
 ---
 
-# Exemplo real de uso
+## Exemplo real de uso
 
-```bash
-./recon_pipeline.sh hackerone.com
+1. Escolher programa autorizado de bug bounty
+2. Descobrir subdomínios
+3. Filtrar ativos
+4. Identificar tecnologias
+5. Encontrar possíveis CVEs
+6. Validar manualmente
+7. Reportar apenas se estiver dentro do escopo
+
+---
+
+## Casos de uso
+
+* Bug bounty
+* Pentest autorizado
+* Pesquisa acadêmica
+* Surface mapping
+* Inventário de ativos
+
+---
+
+## Melhorias futuras
+
+* Integração com ZMap
+* Integração com ZGrab2
+* Screenshots automáticos
+* Banco de dados
+* Dashboard web
+* Sistema estilo Shodan
+
+---
+
+## Aviso legal
+
+Use apenas em ativos próprios ou com autorização explícita.
+Não utilize contra infraestruturas fora do escopo.
+
 ```
-
-ou laboratórios:
-
-* entity["software","OWASP Juice Shop","intentionally vulnerable web application"]
-* entity["software","Metasploitable","intentionally vulnerable machine"]
-
----
-
-# Como sistemas estilo Shodan funcionam
-
-Pipeline parecido:
-
-```text
-ZMap → descobre IPs
-ZGrab2 → coleta banners
-Banco de dados
-Motor de busca
 ```
-
-Ferramenta relacionada:
-
-entity["software","ZGrab2","application layer banner grabber"]
-
----
-
-# Uso responsável
-
-Use apenas em:
-
-* laboratórios
-* ativos próprios
-* programas autorizados de bug bounty como entity["company","HackerOne","bug bounty platform"] e entity["company","Bugcrowd","bug bounty platform"]
-
-Sempre confira escopo antes de escanear.
-
----
-
-# Melhorias futuras
-
-* integração com entity["software","dnsx","ProjectDiscovery DNS toolkit"]
-* screenshots automáticos
-* classificação por severidade
-* export para JSON
-* dashboard próprio estilo entity["company","Shodan","search engine for internet-connected devices"]
