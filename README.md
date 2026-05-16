@@ -165,8 +165,8 @@ Nmap
 Clone o projeto:
 
 ```bash
-git clone https://github.com/seuusuario/mini-recon-pipeline.git
-cd mini-recon-pipeline
+git clone https://github.com/sucloudflare/scan-all-internet.git
+cd scan-all-internet
 ```
 
 Dê permissão:
